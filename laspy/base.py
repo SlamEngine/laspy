@@ -167,12 +167,12 @@ class DataProvider():
                 if self.manager.mode == "r":
                     raise laspy.util.LaspyException("""Invalid Point Records Count Information Encountered in Header.
                                         Please correct. Header.point_records_count = %i, and %i records actually detected."""%(self.manager.header.point_records_count, len(self._pmap)))
-                else:
-                    if self.manager.point_offset == 0:
-                        print("""WARNING: laspy found invalid data in header.point_records_count.
-                              Header.point_records_count = %i, and %i records actually detected.
-                              Attempting to correct mismatch.""") % (self.manager.header.point_records_count, len(self._pmap))
-                        self.manager.header.point_records_count = len(self._pmap)
+#                else:
+#                    if self.manager.point_offset == 0:
+#                        print("""WARNING: laspy found invalid data in header.point_records_count.
+#                              Header.point_records_count = %i, and %i records actually detected.
+#                              Attempting to correct mismatch.""") % (self.manager.header.point_records_count, len(self._pmap))
+#                        self.manager.header.point_records_count = len(self._pmap)
         else:
             self._pmap = np.frombuffer(self._mmap, self.pointfmt,
                                        offset=self.manager.header.data_offset,
@@ -207,11 +207,11 @@ class DataProvider():
                     self._mmap=FakeMmap(self.filename)
                 else:
                     self._mmap = mmap.mmap(self.fileref.fileno(), 0, access = mmap.ACCESS_READ)
-                    self._headermmap = mmap.mmap(self.fileref.fileno(), 1024, access = mmap.ACCESS_READ)
+                    self._headermmap = mmap.mmap(self.fileref.fileno(), 227, access = mmap.ACCESS_READ)
             elif self.mode in ("w", "rw"):
                 self.mmap_offset = np.mod(self.manager.point_offset, mmap.ALLOCATIONGRANULARITY)
                 self._mmap = mmap.mmap(self.fileref.fileno(), 0, access = mmap.ACCESS_WRITE, offset=(self.manager.point_offset//mmap.ALLOCATIONGRANULARITY)*mmap.ALLOCATIONGRANULARITY)
-                self._headermmap = mmap.mmap(self.fileref.fileno(), 1024, access = mmap.ACCESS_WRITE)
+                self._headermmap = mmap.mmap(self.fileref.fileno(), 227, access = mmap.ACCESS_WRITE)
             else:
                 raise laspy.util.LaspyException("Invalid Mode: " + str(self.mode))
         except Exception as e:
