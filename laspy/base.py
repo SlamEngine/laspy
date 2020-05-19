@@ -99,10 +99,12 @@ class DataProvider():
         self.filename = filename
         self.fileref = False
         self._mmap = False
+        self._headermmap = False
         self._pmap = False
         self._evlrmap = False
         self.manager = manager
         self.mode = manager.mode
+        self.mmap_offset = 0
         # Figure out if this file is compressed
         if self.mode in ("w"):
             self.compressed = False
@@ -160,16 +162,17 @@ class DataProvider():
 
         if self.manager.header.version not in ("1.3", "1.4"):
             self._pmap = np.frombuffer(self._mmap, self.pointfmt,
-                                       offset=self.manager.header.data_offset)
+                                        offset=self.manager.header.data_offset+self.mmap_offset)
             if self.manager.header.point_records_count != len(self._pmap):
                 if self.manager.mode == "r":
                     raise laspy.util.LaspyException("""Invalid Point Records Count Information Encountered in Header.
                                         Please correct. Header.point_records_count = %i, and %i records actually detected."""%(self.manager.header.point_records_count, len(self._pmap)))
                 else:
-                    print("""WARNING: laspy found invalid data in header.point_records_count.
-                            Header.point_records_count = %i, and %i records actually detected.
-                            Attempting to correct mismatch.""") % (self.manager.header.point_records_count, len(self._pmap))
-                    self.manager.header.point_records_count = len(self._pmap)
+                    if self.manager.point_offset == 0:
+                        print("""WARNING: laspy found invalid data in header.point_records_count.
+                              Header.point_records_count = %i, and %i records actually detected.
+                              Attempting to correct mismatch.""") % (self.manager.header.point_records_count, len(self._pmap))
+                        self.manager.header.point_records_count = len(self._pmap)
         else:
             self._pmap = np.frombuffer(self._mmap, self.pointfmt,
                                        offset=self.manager.header.data_offset,
@@ -204,8 +207,11 @@ class DataProvider():
                     self._mmap=FakeMmap(self.filename)
                 else:
                     self._mmap = mmap.mmap(self.fileref.fileno(), 0, access = mmap.ACCESS_READ)
+                    self._headermmap = mmap.mmap(self.fileref.fileno(), 1024, access = mmap.ACCESS_READ)
             elif self.mode in ("w", "rw"):
-                self._mmap = mmap.mmap(self.fileref.fileno(), 0, access = mmap.ACCESS_WRITE)
+                self.mmap_offset = np.mod(self.manager.point_offset, mmap.ALLOCATIONGRANULARITY)
+                self._mmap = mmap.mmap(self.fileref.fileno(), 0, access = mmap.ACCESS_WRITE, offset=(self.manager.point_offset//mmap.ALLOCATIONGRANULARITY)*mmap.ALLOCATIONGRANULARITY)
+                self._headermmap = mmap.mmap(self.fileref.fileno(), 1024, access = mmap.ACCESS_WRITE)
             else:
                 raise laspy.util.LaspyException("Invalid Mode: " + str(self.mode))
         except Exception as e:
@@ -269,6 +275,7 @@ class FileManager(object):
         self.point_refs = False
         self._current = 0
         self.padded = False
+        self.point_offset = 0
         if self.mode in ("r", "r-"):
             self.setup_read_write(vlrs,evlrs, read_only=True)
             return
@@ -700,7 +707,7 @@ class FileManager(object):
 
     def _get_raw_datum(self, rec_offs, spec):
         '''return raw bytes associated with non dimension field (VLR/Header)'''
-        return(self.data_provider._mmap[(rec_offs + spec.offs):(rec_offs + spec.offs
+        return(self.data_provider._headermmap[(rec_offs + spec.offs):(rec_offs + spec.offs
                         + spec.num*spec.length)])
 
     def _get_datum(self, rec_offs, spec):
@@ -1116,7 +1123,7 @@ class Writer(FileManager):
         self.header.point_records_count = num_recs
         if self.evlrs in [False, []]:
             #old_size = self.data_provider.filesize()
-            old_size = self.header.data_offset
+            old_size = self.header.data_offset + self.point_offset
             self.data_provider._mmap.flush()
             self.data_provider.fileref.seek(old_size, 0)
             self.data_provider.fileref.write(b"\x00" * (bytes_to_pad))
@@ -1277,6 +1284,36 @@ class Writer(FileManager):
         #bytestr = pack(big_fmt_string, *out)
         #self.data_provider._mmap[self.header.data_offset:self.data_provider._mmap.size()] = bytestr
 
+    def set_points_append(self, points):
+        '''Set the point data for the file, using either a list of laspy.util.Point
+        instances, or a numpy array of point data (as recieved from get_points).'''
+        if isinstance(points, GeneratorType):
+            points = list(points)
+        if not self.has_point_records:
+            self.has_point_records = True
+            #self.pad_file_for_point_recs(len(points))
+        if isinstance(points[0], laspy.util.Point):
+            self.data_provider._mmap[self.header.data_offset:self.data_provider._mmap.size()] = b"".join([x.pack() for x in points])
+            self.data_provider.point_map()
+        else:
+             #self.data_provider._mmap[self.header.data_offset:self.data_provider._mmap.size()] = points.tostring()
+             #self.data_provider._pmap["point"] = points["point"]
+             old_point_count = self.header.point_records_count
+             self.pad_file_for_point_recs(len(points))
+             self.point_offset = self.point_offset + self.point_format.rec_len * len(points)
+             self.data_provider._pmap[:] = points[:]
+             self.header.point_records_count += old_point_count
+             #self.data_provider.point_map()
+        #single_fmt = self.point_format.pt_fmt_long[1:]
+        #big_fmt_string = "".join(["<", single_fmt*self.header.point_records_count])
+        #out = []
+        #(point.unpacked for point in points)
+        #for i in points:
+        #    out.extend(i.unpacked)
+        #bytestr = pack(big_fmt_string, *out)
+        #self.data_provider._mmap[self.header.data_offset:self.data_provider._mmap.size()] = bytestr
+
+
     def _set_raw_points(self, new_raw_points):
         if not self.has_point_records:
             self.has_point_records = True
@@ -1298,7 +1335,7 @@ class Writer(FileManager):
     def _set_raw_datum(self, rec_offs, spec, val):
         '''Set a non dimension field with appropriate record type offset (0 for header)
         , appropriate spec object, and a new value. Uses raw bytes.'''
-        self.data_provider._mmap[rec_offs+spec.offs:rec_offs+spec.offs +
+        self.data_provider._headermmap[rec_offs+spec.offs:rec_offs+spec.offs +
                   spec.num*spec.length] = val
         return
 
@@ -1309,9 +1346,9 @@ class Writer(FileManager):
             lb = rec_offs + dim.offs
             ub = lb + dim.length
             try:
-                self.data_provider._mmap[lb:ub] = struct.pack(dim.fmt, val)
+                self.data_provider._headermmap[lb:ub] = struct.pack(dim.fmt, val)
             except:
-                self.data_provider._mmap[lb:ub] = struct.pack(dim.fmt, int(val))
+                self.data_provider._headermmap[lb:ub] = struct.pack(dim.fmt, int(val))
 
             return
 
@@ -1332,7 +1369,7 @@ class Writer(FileManager):
                 outbyte = struct.pack(dim.fmt, q)
             except:
                 outbyte = struct.pack(dim.fmt, int(val[x]))
-            self.data_provider._mmap[(x*dim.length + rec_offs +
+            self.data_provider._headermmap[(x*dim.length + rec_offs +
                     dim.offs):((x+1)*dim.length + rec_offs
                     + dim.offs)]=outbyte
         list(map(f, xrange(dim.num)))
@@ -1684,4 +1721,3 @@ class Writer(FileManager):
             newmap["point"]["extra_bytes"] = extra_bytes
         else:
             raise laspy.util.LaspyException("Extra bytes not present in point format. Try creating a new file with an extended point record length.")
-
